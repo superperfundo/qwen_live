@@ -1,0 +1,7 @@
+.venv*/
+__pycache__/
+*.pyc
+voices/*.wav
+transcripts/
+check_tts.wav
+.DS_Store
