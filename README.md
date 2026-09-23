@@ -35,7 +35,7 @@ from Hugging Face on first use: Whisper large-v3-turbo (~1.6 GB), Qwen3-TTS Voic
 Hands-free mode calibrates to the room's noise for half a second at startup and ends your turn
 after `--pause` seconds of silence (default 1.5; raise it if it cuts you off mid-thought). One turn
 can run up to `--max-turn` seconds of talking (default 300). Push-to-talk has no limit. It cannot interrupt the assistant yet; wait for
-it to finish. Ctrl+C quits. Every exchange is appended to `transcripts/<stamp>.jsonl`; continue
+it to finish. Ctrl+C quits. In a `remember` session every exchange is appended to `transcripts/<stamp>.jsonl`; continue
 one later with `--resume transcripts/<stamp>.jsonl`.
 
 Options worth knowing:
@@ -46,10 +46,18 @@ Options worth knowing:
 - `--system "..."` the persona. The default asks for short spoken answers with no markdown.
 - `--model`, `--ctx` (default 32k), `--think` (Qwen thinks first; slower), `--stt-model`.
 
-## Memory
+## Memory (opt-in)
 
-qwen_live remembers you between conversations, without pasting its whole history into every prompt.
-Everything lives in one local SQLite file, `memory.db` (git-ignored, never leaves the machine):
+By default a session is off the record: nothing is read from memory, nothing is written, and no
+transcript is kept. Start with `remember` to turn memory on for that session:
+
+```bash
+.venv/bin/python qwen_live.py remember
+```
+
+A `remember` session uses what it knows about you, can save new things, keeps a transcript in
+`transcripts/`, and is summarized into memory when you quit. It doesn't paste its whole history into
+every prompt. Everything lives in one local SQLite file, `memory.db` (git-ignored, never leaves the machine):
 
 - **Memories**: short notes about you (facts, preferences, people, ongoing threads, events), each with
   an importance from 1 to 5.
@@ -83,7 +91,7 @@ Review and edit it yourself:
 .venv/bin/python memory.py import          # summarize old transcripts/*.jsonl into memory
 ```
 
-`--no-memory` runs a session without reading or writing memory; `--memory-db` points at another file.
+`--remember` is the same as `remember`; `--memory-db` points at another file.
 
 ## Bluetooth headsets
 

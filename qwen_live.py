@@ -537,7 +537,11 @@ def run_check(args, speech: Speech):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Talk to a local Qwen with a microphone and headphones.")
+    ap = argparse.ArgumentParser(description="Talk to a local Qwen with a microphone and headphones. Nothing is saved unless you "
+                                             "start it with 'remember'.")
+    ap.add_argument("mode", nargs="?", choices=["remember"],
+                    help="'remember': this session uses long-term memory and is saved (transcript, summary, memories). "
+                         "Without it nothing is read from or written to memory, and no transcript is kept.")
     ap.add_argument("--model", default=OLLAMA_MODEL, help=f"Ollama model (default {OLLAMA_MODEL})")
     ap.add_argument("--ollama-url", default=OLLAMA_URL)
     ap.add_argument("--ctx", type=int, default=OLLAMA_NUM_CTX, help=f"context window (default {OLLAMA_NUM_CTX})")
@@ -558,7 +562,7 @@ def main():
     ap.add_argument("--max-turn", type=float, default=300.0, help="longest you can talk in one turn, in seconds (default 300)")
     ap.add_argument("--resume", help="transcript .jsonl to continue from")
     ap.add_argument("--check", action="store_true", help="no-microphone self test, then exit")
-    ap.add_argument("--no-memory", action="store_true", help="don't use or update long-term memory this session")
+    ap.add_argument("--remember", action="store_true", help="same as the 'remember' mode")
     ap.add_argument("--memory-db", default=str(ltm.DB_PATH), help=f"memory database (default {ltm.DB_PATH}); manage it with memory.py")
     args = ap.parse_args()
 
@@ -581,7 +585,8 @@ def main():
     speech.stt()   # load now, not on the first utterance
     speaker = Speaker(speech, ref_audio, ref_text, device=out_dev, tail_seconds=args.tail)
 
-    mem = None if args.no_memory else ltm.Memory(Path(args.memory_db))
+    remembering = args.remember or args.mode == "remember"
+    mem = ltm.Memory(Path(args.memory_db)) if remembering else None
     chat = ltm.ollama_chat_fn(args.ollama_url, args.model, args.ctx)
     session_id = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
     if mem:
@@ -603,14 +608,20 @@ def main():
             if line.strip():
                 messages.append(json.loads(line))
         log(f"resumed {len(messages) - 1} messages from {args.resume}")
-    TRANSCRIPTS_DIR.mkdir(exist_ok=True)
-    transcript = TRANSCRIPTS_DIR / f"{session_id}.jsonl"
+    transcript = None
+    if mem:
+        TRANSCRIPTS_DIR.mkdir(exist_ok=True)
+        transcript = TRANSCRIPTS_DIR / f"{session_id}.jsonl"
 
     mic = Mic(device=in_dev, stop_after=args.pause, max_seconds=args.max_turn)
     if not args.push_to_talk:
         noise = mic.calibrate()
         log(f"mic calibrated (noise floor {noise:.4f}, start threshold {mic.start_threshold:.4f})")
-    log(f"\nTalking to {args.model}. Ctrl+C to quit. Transcript: {transcript}\n")
+    if mem:
+        log(f"\nTalking to {args.model}, REMEMBERING this session (transcript {transcript}). Ctrl+C to quit.\n")
+    else:
+        log(f"\nTalking to {args.model}, off the record: nothing is saved and no memory is used. "
+            f"Start with 'remember' to change that. Ctrl+C to quit.\n")
 
     try:
         while True:
@@ -682,8 +693,9 @@ def main():
             _real_stdout.write("\n")
             full = clean_for_speech("".join(reply))
             messages.append({"role": "assistant", "content": full})
-            with transcript.open("a") as f:
-                f.write(json.dumps({"role": "user", "content": heard}) + "\n" + json.dumps(messages[-1]) + "\n")
+            if transcript:
+                with transcript.open("a") as f:
+                    f.write(json.dumps({"role": "user", "content": heard}) + "\n" + json.dumps(messages[-1]) + "\n")
             if mem:
                 mem.log_exchange(session_id, heard, full)
             speaker.wait()
