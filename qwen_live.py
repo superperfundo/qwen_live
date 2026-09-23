@@ -265,7 +265,7 @@ def ensure_voice(speech: Speech, description: str, voice_file: str | None, voice
 class Mic:
     """Records one utterance: waits for speech, stops after a pause. Energy-based, no extra deps."""
 
-    def __init__(self, device=None, start_threshold=0.015, stop_after=1.0, max_seconds=45.0, min_speech=0.25):
+    def __init__(self, device=None, start_threshold=0.015, stop_after=1.5, max_seconds=300.0, min_speech=0.25):
         self.device = device
         self.start_threshold = start_threshold
         self.stop_after = stop_after
@@ -290,6 +290,7 @@ class Mic:
 
         chunks, speaking, silence, spoken = [], False, 0.0, 0.0
         started = time.time()
+        speech_started = None
         with sd.InputStream(samplerate=STT_SR, channels=1, dtype="float32", blocksize=block, device=self.device, callback=cb):
             while True:
                 data = q.get()
@@ -297,6 +298,7 @@ class Mic:
                 if not speaking:
                     if rms > self.start_threshold:
                         speaking = True
+                        speech_started = time.time()
                         chunks.append(data)
                         spoken += len(data) / STT_SR
                     elif time.time() - started > 120:
@@ -308,7 +310,10 @@ class Mic:
                     spoken += len(data) / STT_SR
                 else:
                     silence += len(data) / STT_SR
-                if silence >= self.stop_after or (time.time() - started) > self.max_seconds:
+                # The cap counts from when you started talking, not from when it started listening
+                if silence >= self.stop_after or (time.time() - speech_started) > self.max_seconds:
+                    if silence < self.stop_after:
+                        log(f"  (reached the {self.max_seconds:.0f}s limit for one turn; raise it with --max-turn)")
                     break
         audio = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
         if spoken < self.min_speech:
@@ -439,7 +444,8 @@ def main():
     ap.add_argument("--list-devices", action="store_true")
     ap.add_argument("--push-to-talk", action="store_true", help="press Enter to start and stop each turn instead of auto-detecting pauses")
     ap.add_argument("--tail", type=float, default=0.4, help="extra seconds to let the last words finish before the mic reopens (default 0.4; raise it for Bluetooth headsets)")
-    ap.add_argument("--pause", type=float, default=1.0, help="seconds of silence that ends your turn (default 1.0)")
+    ap.add_argument("--pause", type=float, default=1.5, help="seconds of silence that ends your turn (default 1.5; raise it if you get cut off mid-thought)")
+    ap.add_argument("--max-turn", type=float, default=300.0, help="longest you can talk in one turn, in seconds (default 300)")
     ap.add_argument("--resume", help="transcript .jsonl to continue from")
     ap.add_argument("--check", action="store_true", help="no-microphone self test, then exit")
     args = ap.parse_args()
@@ -472,7 +478,7 @@ def main():
     TRANSCRIPTS_DIR.mkdir(exist_ok=True)
     transcript = TRANSCRIPTS_DIR / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.jsonl"
 
-    mic = Mic(device=in_dev, stop_after=args.pause)
+    mic = Mic(device=in_dev, stop_after=args.pause, max_seconds=args.max_turn)
     if not args.push_to_talk:
         noise = mic.calibrate()
         log(f"mic calibrated (noise floor {noise:.4f}, start threshold {mic.start_threshold:.4f})")
