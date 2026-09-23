@@ -5,3 +5,6 @@ voices/*.wav
 transcripts/
 check_tts.wav
 .DS_Store
+memory.db
+memory.db-*
+memory_export.md

@@ -46,6 +46,45 @@ Options worth knowing:
 - `--system "..."` the persona. The default asks for short spoken answers with no markdown.
 - `--model`, `--ctx` (default 32k), `--think` (Qwen thinks first; slower), `--stt-model`.
 
+## Memory
+
+qwen_live remembers you between conversations, without pasting its whole history into every prompt.
+Everything lives in one local SQLite file, `memory.db` (git-ignored, never leaves the machine):
+
+- **Memories**: short notes about you (facts, preferences, people, ongoing threads, events), each with
+  an importance from 1 to 5.
+- **Sessions**: one summary per conversation.
+- **Exchanges**: every turn verbatim, searchable.
+
+How it's used, cheapest first:
+
+1. **Profile**: the ~10 most important memories and the last session's summary go in the system prompt
+   once per session.
+2. **Automatic recall**: each thing you say is keyword-searched against memory; clear matches (sharing
+   two or more content words) are added for that one turn only. No extra model call.
+3. **Tools**: Qwen can call `search_memory` (memories, session summaries, past exchanges) when you refer
+   to something from before, and `remember` when you tell it something worth keeping ("remember that...").
+   A search that finds nothing makes it say it doesn't remember rather than guess.
+4. **Summaries**: when you quit (Ctrl+C) it summarizes the conversation and extracts new memories,
+   reconciling them with existing ones (updated, not duplicated). Press Ctrl+C twice to skip; it's done
+   on the next start. Long conversations fold their oldest turns into a running summary so the context
+   never fills up.
+
+Review and edit it yourself:
+
+```bash
+.venv/bin/python memory.py export          # everything, readable, in memory_export.md
+.venv/bin/python memory.py list            # memories with their IDs
+.venv/bin/python memory.py search "telescope"
+.venv/bin/python memory.py forget 7        # remove one
+.venv/bin/python memory.py edit 3 "new text"
+.venv/bin/python memory.py add "Sam prefers short answers" --kind preference --importance 5
+.venv/bin/python memory.py sessions        # then: memory.py show SESSION_ID
+.venv/bin/python memory.py import          # summarize old transcripts/*.jsonl into memory
+```
+
+`--no-memory` runs a session without reading or writing memory; `--memory-db` points at another file.
+
 ## Bluetooth headsets
 
 If the same Bluetooth headset is both your mic and your headphones, macOS switches it to its phone-call

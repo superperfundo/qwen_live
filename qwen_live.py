@@ -36,6 +36,8 @@ from pathlib import Path
 import httpx
 import numpy as np
 
+import memory as ltm
+
 # mlx-audio prints progress on stdout; keep our own output readable
 _real_stdout = sys.stdout
 
@@ -101,6 +103,113 @@ def ollama_stream(url: str, model: str, messages: list[dict], num_ctx: int, thin
                 break
 
 
+def ollama_events(url: str, model: str, messages: list[dict], num_ctx: int, think: bool, tools: list | None = None):
+    """Stream a reply: yields ("token", text) as it is written, and ("tools", [calls]) if the model calls tools."""
+    payload = {"model": model, "messages": messages, "stream": True, "think": think, "options": {"num_ctx": num_ctx}}
+    if tools:
+        payload["tools"] = tools
+    calls = []
+    with httpx.stream("POST", f"{url}/api/chat", json=payload, timeout=600) as r:
+        r.raise_for_status()
+        for line in r.iter_lines():
+            if not line:
+                continue
+            data = json.loads(line)
+            msg = data.get("message", {})
+            if msg.get("content"):
+                yield "token", msg["content"]
+            calls += msg.get("tool_calls") or []
+            if data.get("done"):
+                break
+    if calls:
+        yield "tools", calls
+
+
+# --- Memory: what the model sees and the tools it can call ---
+
+MEMORY_TOOLS = [
+    {"type": "function", "function": {
+        "name": "search_memory",
+        "description": "Search your long-term memory of this person and your past conversations with them. Use it when they "
+                       "refer to something from before that isn't already in front of you ('remember when...', 'what did I say about...', "
+                       "a name you don't recognise). Don't use it for general knowledge.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "a few keywords: names, places, topics"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "remember",
+        "description": "Save something to long-term memory: when they ask you to remember something, or tell you a durable fact about "
+                       "themselves, a person in their life, a preference, or an ongoing plan. One short third-person sentence.",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string", "description": "e.g. 'Sam's sister Maya is getting married in May.'"},
+            "kind": {"type": "string", "enum": list(ltm.KINDS)},
+            "importance": {"type": "integer", "description": "1-5; 5 if they explicitly asked you to remember it"}},
+            "required": ["text"]}}},
+]
+
+MEMORY_SYSTEM = (
+    "You have a long-term memory of this person. What you already know is listed below; more can be found with the "
+    "search_memory tool, and remember saves something new. Use memory naturally, the way a friend would, without announcing "
+    "it ('I remember you said...' is fine, 'according to my memory database' is not). Only search when they refer to "
+    "something from before that isn't here. If a tool finds nothing, say you don't remember rather than guessing."
+)
+
+
+def memory_system_prompt(base: str, mem: "ltm.Memory") -> str:
+    parts = [base, MEMORY_SYSTEM]
+    profile = mem.profile()
+    if profile:
+        parts.append("What you know about them:\n" + profile)
+    last = mem.last_session_summary()
+    if last:
+        parts.append("Last time you talked: " + last)
+    return "\n\n".join(parts)
+
+
+def drop_repeat(text: str, already: str) -> str:
+    """If a post-tool round starts by repeating what was already said, drop the repeat."""
+    norm = lambda t: re.sub(r"\W+", " ", clean_for_speech(t)).strip().lower()
+    t, a = clean_for_speech(text), norm(already)
+    if a and norm(t).startswith(a[:60]):
+        cut = len(already)
+        return t[cut:] if len(t) > cut else ""
+    return t
+
+
+def emit(value: str, reply: list, said: list, splitter, speaker):
+    if not value:
+        return
+    reply.append(value)
+    said.append(value)
+    _real_stdout.write(value)
+    _real_stdout.flush()
+    for sentence in splitter.feed(value):
+        speaker.say(sentence)
+
+
+def run_tool(mem: "ltm.Memory", call: dict) -> tuple[str, str]:
+    fn = call.get("function", {})
+    name, args = fn.get("name", ""), fn.get("arguments") or {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            args = {"query": args, "text": args}
+    if name == "search_memory":
+        hits = mem.search(str(args.get("query", "")))
+        log(f"  [memory search: {args.get('query')!r} -> {len(hits)} hit(s)]")
+        if not hits:
+            return name, "Nothing found in memory for that."
+        return name, "\n".join(f"- ({h['type']}, {h['when']}) {h['text']}" for h in hits)
+    if name == "remember":
+        text = str(args.get("text", "")).strip()
+        if not text:
+            return name, "Nothing to remember."
+        action, mem_id = mem.remember(text, str(args.get("kind", "note")), int(args.get("importance", 3) or 3))
+        log(f"  [memory {action} #{mem_id}: {text}]")
+        return name, f"Saved ({action})."
+    return name, f"Unknown tool {name}."
+
+
 # --- Sentence chunking for streaming speech ---
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])[\"')\]]*\s+|\n+")
@@ -108,6 +217,7 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])[\"')\]]*\s+|\n+")
 
 def clean_for_speech(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"</?think>?", "", text)   # stray fragments a model leaks after a tool call
     text = re.sub(r"[*_#`>]+", "", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
@@ -448,6 +558,8 @@ def main():
     ap.add_argument("--max-turn", type=float, default=300.0, help="longest you can talk in one turn, in seconds (default 300)")
     ap.add_argument("--resume", help="transcript .jsonl to continue from")
     ap.add_argument("--check", action="store_true", help="no-microphone self test, then exit")
+    ap.add_argument("--no-memory", action="store_true", help="don't use or update long-term memory this session")
+    ap.add_argument("--memory-db", default=str(ltm.DB_PATH), help=f"memory database (default {ltm.DB_PATH}); manage it with memory.py")
     args = ap.parse_args()
 
     if args.list_devices:
@@ -469,14 +581,30 @@ def main():
     speech.stt()   # load now, not on the first utterance
     speaker = Speaker(speech, ref_audio, ref_text, device=out_dev, tail_seconds=args.tail)
 
-    messages = [{"role": "system", "content": args.system}]
+    mem = None if args.no_memory else ltm.Memory(Path(args.memory_db))
+    chat = ltm.ollama_chat_fn(args.ollama_url, args.model, args.ctx)
+    session_id = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}"
+    if mem:
+        mem.start_session(session_id)
+        pending = [r["id"] for r in mem.sessions() if not r["summary"] and r["turns"] and r["id"] != session_id]
+        for sid in pending:   # sessions that ended without a summary (crash, second Ctrl+C)
+            log(f"summarizing unfinished session {sid} ...")
+            msgs = [x for e in mem.session_exchanges(sid) for x in ({"role": "user", "content": e["user"]}, {"role": "assistant", "content": e["assistant"]})]
+            try:
+                ltm.summarize_session(mem, sid, msgs, chat, log)
+            except Exception as exc:
+                log(f"  (could not summarize {sid}: {exc})")
+        profile_ids = mem.profile_ids()
+        n_mem = mem.db.execute("SELECT count(*) FROM memories").fetchone()[0]
+        log(f"memory: {n_mem} memories, {len(mem.sessions()) - 1} past sessions ({args.memory_db})")
+    messages = [{"role": "system", "content": memory_system_prompt(args.system, mem) if mem else args.system}]
     if args.resume:
         for line in Path(args.resume).read_text().splitlines():
             if line.strip():
                 messages.append(json.loads(line))
         log(f"resumed {len(messages) - 1} messages from {args.resume}")
     TRANSCRIPTS_DIR.mkdir(exist_ok=True)
-    transcript = TRANSCRIPTS_DIR / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.jsonl"
+    transcript = TRANSCRIPTS_DIR / f"{session_id}.jsonl"
 
     mic = Mic(device=in_dev, stop_after=args.pause, max_seconds=args.max_turn)
     if not args.push_to_talk:
@@ -498,17 +626,56 @@ def main():
             log(f"You ({time.time() - t0:.1f}s): {heard}")
             messages.append({"role": "user", "content": heard})
 
+            if mem:
+                before = len(messages)
+                messages = ltm.compress_history(messages, chat)
+                if len(messages) < before:
+                    log("  [folded older turns into a summary to keep the context small]")
+
+            # Automatic recall: memories that clearly match what was just said ride along for this turn only,
+            # placed just before the new message so the cached prefix of the conversation stays valid.
+            request = list(messages)
+            if mem:
+                hits = mem.recall(heard, exclude=profile_ids)
+                if hits:
+                    log(f"  [recalled {len(hits)} memory(ies)]")
+                    note = "Possibly relevant from memory (use only if it fits):\n" + "\n".join(f"- {h['text']}" for h in hits)
+                    request = request[:-1] + [{"role": "system", "content": note}, request[-1]]
+
             speaker.begin_turn()
             splitter = SentenceSplitter()
             reply, t1 = [], time.time()
             _real_stdout.write("Qwen: ")
             _real_stdout.flush()
-            for token in ollama_stream(args.ollama_url, args.model, messages, args.ctx, args.think):
-                reply.append(token)
-                _real_stdout.write(token)
-                _real_stdout.flush()
-                for sentence in splitter.feed(token):
-                    speaker.say(sentence)
+            already = ""   # what has been spoken this turn, so a post-tool round can't repeat it
+            for _round in range(3):   # a reply may call memory tools, then continue
+                calls, said = [], []
+                # After a tool result Qwen tends to draft its answer in "thinking" and leak it into the text;
+                # with thinking on for those rounds the draft goes to its own field and the answer comes once.
+                think = args.think or _round > 0
+                pending = "" if _round > 0 and already else None   # hold the start until we know it isn't a repeat
+                for kind, value in ollama_events(args.ollama_url, args.model, request, args.ctx, think,
+                                                 tools=MEMORY_TOOLS if mem else None):
+                    if kind == "tools":
+                        calls = value
+                        continue
+                    if pending is not None:
+                        pending += value
+                        if len(pending) < len(already) + 10:
+                            continue
+                        value, pending = drop_repeat(pending, already), None
+                    emit(value, reply, said, splitter, speaker)
+                if pending:
+                    emit(drop_repeat(pending, already), reply, said, splitter, speaker)
+                already += "".join(said)
+                if not calls:
+                    break
+                step = [{"role": "assistant", "content": "".join(said), "tool_calls": calls}]
+                for call in calls:
+                    name, result = run_tool(mem, call)
+                    step.append({"role": "tool", "tool_name": name, "content": result})
+                request += step
+                messages += step
             for sentence in splitter.flush():
                 speaker.say(sentence)
             speaker.end_turn()
@@ -516,12 +683,23 @@ def main():
             full = clean_for_speech("".join(reply))
             messages.append({"role": "assistant", "content": full})
             with transcript.open("a") as f:
-                f.write(json.dumps(messages[-2]) + "\n" + json.dumps(messages[-1]) + "\n")
+                f.write(json.dumps({"role": "user", "content": heard}) + "\n" + json.dumps(messages[-1]) + "\n")
+            if mem:
+                mem.log_exchange(session_id, heard, full)
             speaker.wait()
             first = f"{speaker.first_audio_at - t1:.1f}s to first audio" if speaker.first_audio_at else "no audio"
             log(f"  ({time.time() - t1:.1f}s total, {first})\n")
     except KeyboardInterrupt:
-        log("\nbye")
+        if mem and mem.session_exchanges(session_id):
+            log("\nsaving memories from this conversation (Ctrl+C again to skip; it'll be done next start) ...")
+            try:
+                res = ltm.summarize_session(mem, session_id, messages, chat, log)
+                log(f"  {res['added']} new, {res['updated']} updated. {res['summary']}")
+            except KeyboardInterrupt:
+                pass
+            except Exception as exc:
+                log(f"  (couldn't summarize now: {exc}; it'll be done next start)")
+        log("bye")
 
 
 if __name__ == "__main__":
