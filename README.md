@@ -33,7 +33,7 @@ from Hugging Face on first use: Whisper large-v3-turbo (~1.6 GB), Qwen3-TTS Voic
 ```
 
 Hands-free mode calibrates to the room's noise for half a second at startup and ends your turn
-after `--pause` seconds of silence (default 1.5; raise it if it cuts you off mid-thought). One turn
+after `--pause` seconds of silence (default 2; raise it if it cuts you off mid-thought). One turn
 can run up to `--max-turn` seconds of talking (default 300). Push-to-talk has no limit. It cannot interrupt the assistant yet; wait for
 it to finish. Ctrl+C quits. In a `remember` session every exchange is appended to `transcripts/<stamp>.jsonl`; continue
 one later with `--resume transcripts/<stamp>.jsonl`.
@@ -97,10 +97,10 @@ Review and edit it yourself:
 
 If the same Bluetooth headset is both your mic and your headphones, macOS switches it to its phone-call
 profile whenever the mic opens: audio drops to mono and muffled, and anything still playing gets cut.
-qwen_live waits for each reply to finish playing (plus `--tail` seconds, default 0.4) before it reopens
+qwen_live waits for each reply to finish playing (plus `--tail` seconds, default 1) before it reopens
 the mic, and prints a note at startup when it sees a shared device. For the best sound, use a separate
-mic with `--input-device` and keep the headset for listening; if the headset is the only mic, try
-`--tail 1.0`.
+mic with `--input-device` and keep the headset for listening; if replies still get clipped, try
+`--tail 1.5`.
 
 ## Latency
 

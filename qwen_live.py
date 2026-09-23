@@ -375,7 +375,7 @@ def ensure_voice(speech: Speech, description: str, voice_file: str | None, voice
 class Mic:
     """Records one utterance: waits for speech, stops after a pause. Energy-based, no extra deps."""
 
-    def __init__(self, device=None, start_threshold=0.015, stop_after=1.5, max_seconds=300.0, min_speech=0.25):
+    def __init__(self, device=None, start_threshold=0.015, stop_after=2.0, max_seconds=300.0, min_speech=0.25):
         self.device = device
         self.start_threshold = start_threshold
         self.stop_after = stop_after
@@ -447,7 +447,7 @@ def push_to_talk_record(device=None) -> np.ndarray | None:
 # --- Playback pipeline: sentences -> TTS thread -> audio queue -> output stream thread ---
 
 class Speaker:
-    def __init__(self, speech: Speech, ref_audio: np.ndarray, ref_text: str, device=None, tail_seconds: float = 0.4):
+    def __init__(self, speech: Speech, ref_audio: np.ndarray, ref_text: str, device=None, tail_seconds: float = 1.0):
         self.speech, self.ref_audio, self.ref_text, self.device = speech, ref_audio, ref_text, device
         self.tail_seconds = tail_seconds
         self.sentences: queue.Queue = queue.Queue()
@@ -511,7 +511,7 @@ def warn_shared_bluetooth(in_dev, out_dev):
     if i == o and not re.search(r"built-in|macbook|mac studio|imac|usb", i, re.I):
         log(f"note: '{i}' is both the mic and the headphones. If it's Bluetooth, opening its mic switches it to call quality\n"
             f"      (mono, muffled) and can clip the end of replies. Better: a separate mic (USB, webcam, or the Mac's own\n"
-            f"      if it has one) via --input-device (see --list-devices). Otherwise raise --tail, e.g. --tail 1.0.")
+            f"      if it has one) via --input-device (see --list-devices). Otherwise raise --tail, e.g. --tail 1.5.")
 
 
 # --- Main loop ---
@@ -557,8 +557,8 @@ def main():
     ap.add_argument("--output-device", help="headphones/speaker name or index")
     ap.add_argument("--list-devices", action="store_true")
     ap.add_argument("--push-to-talk", action="store_true", help="press Enter to start and stop each turn instead of auto-detecting pauses")
-    ap.add_argument("--tail", type=float, default=0.4, help="extra seconds to let the last words finish before the mic reopens (default 0.4; raise it for Bluetooth headsets)")
-    ap.add_argument("--pause", type=float, default=1.5, help="seconds of silence that ends your turn (default 1.5; raise it if you get cut off mid-thought)")
+    ap.add_argument("--tail", type=float, default=1.0, help="extra seconds to let the last words finish before the mic reopens (default 1.0)")
+    ap.add_argument("--pause", type=float, default=2.0, help="seconds of silence that ends your turn (default 2.0; raise it if you get cut off mid-thought)")
     ap.add_argument("--max-turn", type=float, default=300.0, help="longest you can talk in one turn, in seconds (default 300)")
     ap.add_argument("--resume", help="transcript .jsonl to continue from")
     ap.add_argument("--check", action="store_true", help="no-microphone self test, then exit")
