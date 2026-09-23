@@ -45,6 +45,15 @@ Options worth knowing:
 - `--system "..."` the persona. The default asks for short spoken answers with no markdown.
 - `--model`, `--ctx` (default 32k), `--think` (Qwen thinks first; slower), `--stt-model`.
 
+## Bluetooth headsets
+
+If the same Bluetooth headset is both your mic and your headphones, macOS switches it to its phone-call
+profile whenever the mic opens: audio drops to mono and muffled, and anything still playing gets cut.
+qwen_live waits for each reply to finish playing (plus `--tail` seconds, default 0.4) before it reopens
+the mic, and prints a note at startup when it sees a shared device. For the best sound, use a separate
+mic with `--input-device` and keep the headset for listening; if the headset is the only mic, try
+`--tail 1.0`.
+
 ## Latency
 
 On an M1 Max with the 27B model: ~1 s to transcribe, ~1 s to first token, and Qwen3-TTS runs at

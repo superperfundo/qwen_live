@@ -332,8 +332,9 @@ def push_to_talk_record(device=None) -> np.ndarray | None:
 # --- Playback pipeline: sentences -> TTS thread -> audio queue -> output stream thread ---
 
 class Speaker:
-    def __init__(self, speech: Speech, ref_audio: np.ndarray, ref_text: str, device=None):
+    def __init__(self, speech: Speech, ref_audio: np.ndarray, ref_text: str, device=None, tail_seconds: float = 0.4):
         self.speech, self.ref_audio, self.ref_text, self.device = speech, ref_audio, ref_text, device
+        self.tail_seconds = tail_seconds
         self.sentences: queue.Queue = queue.Queue()
         self.audio: queue.Queue = queue.Queue()
         self.first_audio_at: float | None = None
@@ -364,6 +365,10 @@ class Speaker:
             while True:
                 a = self.audio.get()
                 if a is None:
+                    # write() returns once audio is queued, not heard. Push a short tail of silence through,
+                    # then wait out the device buffer, so the last words play before the mic reopens.
+                    out.write(np.zeros((int(self.tail_seconds * TTS_SR), 1), np.float32))
+                    time.sleep(float(out.latency) + self.tail_seconds)
                     self._turn_done.set()
                     continue
                 if self.first_audio_at is None:
@@ -377,6 +382,21 @@ class Speaker:
 
     def wait(self):
         self._turn_done.wait()
+
+
+def warn_shared_bluetooth(in_dev, out_dev):
+    """A Bluetooth headset used as both mic and speaker drops to its low-quality call profile whenever
+    the mic opens, which also cuts off whatever is still playing. Say so once."""
+    import sounddevice as sd
+    try:
+        i = sd.query_devices(in_dev, kind="input")["name"]
+        o = sd.query_devices(out_dev, kind="output")["name"]
+    except Exception:
+        return
+    if i == o and not re.search(r"built-in|macbook|mac studio|imac|usb", i, re.I):
+        log(f"note: '{i}' is both the mic and the headphones. If it's Bluetooth, opening its mic switches it to call quality\n"
+            f"      (mono, muffled) and can clip the end of replies. Better: a separate mic (USB, webcam, or the Mac's own\n"
+            f"      if it has one) via --input-device (see --list-devices). Otherwise raise --tail, e.g. --tail 1.0.")
 
 
 # --- Main loop ---
@@ -418,6 +438,7 @@ def main():
     ap.add_argument("--output-device", help="headphones/speaker name or index")
     ap.add_argument("--list-devices", action="store_true")
     ap.add_argument("--push-to-talk", action="store_true", help="press Enter to start and stop each turn instead of auto-detecting pauses")
+    ap.add_argument("--tail", type=float, default=0.4, help="extra seconds to let the last words finish before the mic reopens (default 0.4; raise it for Bluetooth headsets)")
     ap.add_argument("--pause", type=float, default=1.0, help="seconds of silence that ends your turn (default 1.0)")
     ap.add_argument("--resume", help="transcript .jsonl to continue from")
     ap.add_argument("--check", action="store_true", help="no-microphone self test, then exit")
@@ -437,9 +458,10 @@ def main():
     in_dev = int(args.input_device) if args.input_device and args.input_device.isdigit() else args.input_device
     out_dev = int(args.output_device) if args.output_device and args.output_device.isdigit() else args.output_device
 
+    warn_shared_bluetooth(in_dev, out_dev)
     ref_audio, ref_text = ensure_voice(speech, args.voice, args.voice_file, args.voice_text)
     speech.stt()   # load now, not on the first utterance
-    speaker = Speaker(speech, ref_audio, ref_text, device=out_dev)
+    speaker = Speaker(speech, ref_audio, ref_text, device=out_dev, tail_seconds=args.tail)
 
     messages = [{"role": "system", "content": args.system}]
     if args.resume:
