@@ -446,10 +446,22 @@ def push_to_talk_record(device=None) -> np.ndarray | None:
 
 # --- Playback pipeline: sentences -> TTS thread -> audio queue -> output stream thread ---
 
+def make_chime(volume: float) -> np.ndarray:
+    """A soft rising two-note chime (A5, then the E above it) that says 'your turn'."""
+    t = np.arange(int(0.5 * TTS_SR)) / TTS_SR
+    chime = np.zeros_like(t)
+    for freq, start in ((880.0, 0.0), (1318.5, 0.1)):
+        s = np.clip(t - start, 0, None)
+        chime += np.where(t >= start, np.sin(2 * np.pi * freq * s) * np.exp(-s * 9) * np.minimum(1, s / 0.004), 0)
+    chime *= np.minimum(1, (t[-1] - t) / 0.02)   # fade the very end so it doesn't click
+    return (volume * chime / np.abs(chime).max()).astype(np.float32).reshape(-1, 1)
+
+
 class Speaker:
-    def __init__(self, speech: Speech, ref_audio: np.ndarray, ref_text: str, device=None, tail_seconds: float = 1.0):
+    def __init__(self, speech: Speech, ref_audio: np.ndarray, ref_text: str, device=None, tail_seconds: float = 1.0,
+                 chime: np.ndarray | None = None):
         self.speech, self.ref_audio, self.ref_text, self.device = speech, ref_audio, ref_text, device
-        self.tail_seconds = tail_seconds
+        self.tail_seconds, self.chime = tail_seconds, chime
         self.sentences: queue.Queue = queue.Queue()
         self.audio: queue.Queue = queue.Queue()
         self.first_audio_at: float | None = None
@@ -480,8 +492,10 @@ class Speaker:
             while True:
                 a = self.audio.get()
                 if a is None:
+                    if self.chime is not None:
+                        out.write(self.chime)
                     # write() returns once audio is queued, not heard. Push a short tail of silence through,
-                    # then wait out the device buffer, so the last words play before the mic reopens.
+                    # then wait out the device buffer, so the last words (and chime) play before the mic reopens.
                     out.write(np.zeros((int(self.tail_seconds * TTS_SR), 1), np.float32))
                     time.sleep(float(out.latency) + self.tail_seconds)
                     self._turn_done.set()
@@ -558,6 +572,7 @@ def main():
     ap.add_argument("--list-devices", action="store_true")
     ap.add_argument("--push-to-talk", action="store_true", help="press Enter to start and stop each turn instead of auto-detecting pauses")
     ap.add_argument("--tail", type=float, default=1.0, help="extra seconds to let the last words finish before the mic reopens (default 1.0)")
+    ap.add_argument("--chime", type=float, default=0.2, help="volume of the chime when a reply finishes, 0-1 (default 0.2; 0 turns it off)")
     ap.add_argument("--pause", type=float, default=2.0, help="seconds of silence that ends your turn (default 2.0; raise it if you get cut off mid-thought)")
     ap.add_argument("--max-turn", type=float, default=300.0, help="longest you can talk in one turn, in seconds (default 300)")
     ap.add_argument("--resume", help="transcript .jsonl to continue from")
@@ -583,7 +598,8 @@ def main():
     warn_shared_bluetooth(in_dev, out_dev)
     ref_audio, ref_text = ensure_voice(speech, args.voice, args.voice_file, args.voice_text)
     speech.stt()   # load now, not on the first utterance
-    speaker = Speaker(speech, ref_audio, ref_text, device=out_dev, tail_seconds=args.tail)
+    speaker = Speaker(speech, ref_audio, ref_text, device=out_dev, tail_seconds=args.tail,
+                      chime=make_chime(args.chime) if args.chime > 0 else None)
 
     remembering = args.remember or args.mode == "remember"
     mem = ltm.Memory(Path(args.memory_db)) if remembering else None

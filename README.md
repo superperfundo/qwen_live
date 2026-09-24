@@ -35,7 +35,7 @@ from Hugging Face on first use: Whisper large-v3-turbo (~1.6 GB), Qwen3-TTS Voic
 Hands-free mode calibrates to the room's noise for half a second at startup and ends your turn
 after `--pause` seconds of silence (default 2; raise it if it cuts you off mid-thought). One turn
 can run up to `--max-turn` seconds of talking (default 300). Push-to-talk has no limit. It cannot interrupt the assistant yet; wait for
-it to finish. Ctrl+C quits. In a `remember` session every exchange is appended to `transcripts/<stamp>.jsonl`; continue
+it to finish: a soft chime plays when it's done and your turn starts (`--chime 0.4` for louder, `--chime 0` for none). Ctrl+C quits. In a `remember` session every exchange is appended to `transcripts/<stamp>.jsonl`; continue
 one later with `--resume transcripts/<stamp>.jsonl`.
 
 Options worth knowing:
