@@ -108,3 +108,7 @@ On an M1 Max with the 27B model: ~1 s to transcribe, ~1 s to first token, and Qw
 about 2x real time, so the first sentence starts roughly 3-4 s after you stop talking and the
 rest keeps up. Shorter replies (the default system prompt asks for them) feel much more like a
 conversation.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
